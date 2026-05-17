@@ -1,6 +1,6 @@
 """
 Bot Caçador de Ofertas - Pelando.com.br → Telegram
-Versão: 4.1 - SEM necessidade de token do ML
+Versão: 4.2
 """
 
 import requests
@@ -11,30 +11,24 @@ import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-# ─────────────────────────────────────────────
-#  CONFIGURAÇÕES — só precisa dessas duas
-# ─────────────────────────────────────────────
 TOKEN_TELEGRAM = os.getenv("TELEGRAM_TOKEN", "SEU_TOKEN_TELEGRAM_AQUI")
 CHAT_ID_CANAL  = os.getenv("TELEGRAM_CHAT",  "@seu_canal_aqui")
 
-INTERVALO_LOOP = 1800  # verifica a cada 30 minutos
+INTERVALO_LOOP = 1800  # 30 minutos
 
-# Palavras que o bot vai procurar nas ofertas
 PALAVRAS_CHAVE = [
     "samsung", "motorola", "xiaomi", "iphone", "celular", "smartphone",
     "shampoo", "cabelo", "loreal", "wella", "condicionador", "tresemme",
-    "salon line", "creme", "máscara capilar",
-    "camiseta", "roupa", "calçado", "tênis", "moletom", "vestido",
-    "livro", "kindle", "mangá",
+    "salon line", "mascara capilar", "creme",
+    "camiseta", "roupa", "calcado", "tenis", "moletom", "vestido",
+    "livro", "kindle", "manga",
 ]
 
-# Feeds RSS do Pelando por categoria
+# Só os feeds que funcionaram
 FEEDS = [
-    ("📱 Celulares & Tech", "https://www.pelando.com.br/feed/categoria/eletronicos"),
-    ("💇 Cabelo & Beleza",  "https://www.pelando.com.br/feed/categoria/beleza"),
-    ("👕 Moda & Roupas",    "https://www.pelando.com.br/feed/categoria/moda"),
-    ("📚 Livros",           "https://www.pelando.com.br/feed/categoria/livros"),
-    ("🔥 Mais Quentes",     "https://www.pelando.com.br/feed"),
+    ("🔥 Oferta",    "https://www.pelando.com.br/feed"),
+    ("🔥 Populares", "https://www.pelando.com.br/feed/popular"),
+    ("🔥 Recentes",  "https://www.pelando.com.br/feed/new"),
 ]
 
 logging.basicConfig(
@@ -60,13 +54,25 @@ def contem_palavra_chave(texto: str) -> bool:
     t = texto.lower()
     return any(p in t for p in PALAVRAS_CHAVE)
 
-def buscar_feed(url: str, categoria: str) -> list:
+def categorizar(texto: str) -> str:
+    t = texto.lower()
+    if any(p in t for p in ["samsung", "motorola", "xiaomi", "iphone", "celular", "smartphone"]):
+        return "📱 Celulares & Tech"
+    if any(p in t for p in ["shampoo", "cabelo", "loreal", "wella", "condicionador", "tresemme", "salon line"]):
+        return "💇 Cabelo & Beleza"
+    if any(p in t for p in ["camiseta", "roupa", "calcado", "tenis", "moletom", "vestido"]):
+        return "👕 Moda & Roupas"
+    if any(p in t for p in ["livro", "kindle", "manga"]):
+        return "📚 Livros"
+    return "🔥 Oferta"
+
+def buscar_feed(url: str, nome: str) -> list:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; OfertasBot/1.0)"}
     ofertas = []
     try:
         r = requests.get(url, headers=headers, timeout=15)
         if r.status_code != 200:
-            log.warning(f"Erro {r.status_code} no feed {categoria}")
+            log.warning(f"Erro {r.status_code} no feed {nome}")
             return []
 
         root    = ET.fromstring(r.content)
@@ -75,7 +81,7 @@ def buscar_feed(url: str, categoria: str) -> list:
             return []
 
         items = channel.findall("item")
-        log.info(f"  {categoria}: {len(items)} oferta(s) no feed")
+        log.info(f"  {nome}: {len(items)} oferta(s) no feed")
 
         for item in items:
             titulo = item.findtext("title", "")
@@ -83,12 +89,12 @@ def buscar_feed(url: str, categoria: str) -> list:
             desc   = item.findtext("description", "")
             guid   = item.findtext("guid", link)
 
-            if not contem_palavra_chave(f"{titulo} {desc}"):
+            texto = f"{titulo} {desc}"
+            if not contem_palavra_chave(texto):
                 continue
 
-            # Limpa HTML da descrição
-            desc_limpa = desc.replace("<p>", "").replace("</p>", "").replace("<br>", "").strip()
-            desc_limpa = desc_limpa[:200] if desc_limpa else ""
+            desc_limpa = desc.replace("<p>", "").replace("</p>", "").replace("<br>", "").strip()[:200]
+            categoria  = categorizar(texto)
 
             ofertas.append({
                 "id":        guid,
@@ -99,11 +105,11 @@ def buscar_feed(url: str, categoria: str) -> list:
             })
 
     except ET.ParseError:
-        log.error(f"Erro ao ler RSS de {categoria}")
+        log.error(f"Erro ao ler RSS de {nome}")
     except requests.exceptions.Timeout:
-        log.error(f"Timeout no feed {categoria}")
+        log.error(f"Timeout no feed {nome}")
     except Exception as e:
-        log.error(f"Erro no feed {categoria}: {e}")
+        log.error(f"Erro no feed {nome}: {e}")
 
     return ofertas
 
@@ -133,14 +139,18 @@ def enviar_telegram(oferta: dict) -> bool:
     return True
 
 def rodar_varredura(historico: set) -> set:
-    total = 0
-    for categoria, url_feed in FEEDS:
-        log.info(f"🔎 Lendo: {categoria}...")
-        ofertas = buscar_feed(url_feed, categoria)
-        novas   = [o for o in ofertas if o["id"] not in historico]
-        log.info(f"  ✅ {len(novas)} nova(s) oferta(s) relevante(s)")
+    total    = 0
+    ids_vistos = set()
 
-        for oferta in novas:
+    for nome, url_feed in FEEDS:
+        log.info(f"🔎 Lendo: {nome}...")
+        ofertas = buscar_feed(url_feed, nome)
+
+        for oferta in ofertas:
+            if oferta["id"] in historico or oferta["id"] in ids_vistos:
+                continue
+            ids_vistos.add(oferta["id"])
+
             if enviar_telegram(oferta):
                 historico.add(oferta["id"])
                 total += 1
@@ -155,7 +165,7 @@ def rodar_varredura(historico: set) -> set:
 
 def main():
     log.info("=" * 52)
-    log.info("  BOT DE OFERTAS v4.1 — INICIANDO")
+    log.info("  BOT DE OFERTAS v4.2 — INICIANDO")
     log.info(f"  Canal:     {CHAT_ID_CANAL}")
     log.info(f"  Fonte:     Pelando.com.br")
     log.info(f"  Intervalo: {INTERVALO_LOOP // 60} minutos")
