@@ -1,6 +1,6 @@
 """
-Bot Caçador de Ofertas - Mercado Livre → Telegram
-Versão: 3.1 (Corrigido - sem official_store)
+Bot Caçador de Ofertas - Pelando.com.br → Telegram
+Versão: 4.0 (Fonte: Pelando RSS)
 """
 
 import requests
@@ -8,34 +8,33 @@ import time
 import os
 import json
 import logging
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 # ─────────────────────────────────────────────
-#  CONFIGURAÇÕES — preencha com seus dados
+#  CONFIGURAÇÕES
 # ─────────────────────────────────────────────
-ACCESS_TOKEN_MELI = os.getenv("MELI_TOKEN",      "SEU_TOKEN_MELI_AQUI")
-TOKEN_TELEGRAM    = os.getenv("TELEGRAM_TOKEN",  "SEU_TOKEN_TELEGRAM_AQUI")
-CHAT_ID_CANAL     = os.getenv("TELEGRAM_CHAT",   "@seu_canal_aqui")
-MEU_ID_AFILIADO   = os.getenv("MELI_AFFILIATE",  "SEU_ID_AFILIADO_AQUI")
+TOKEN_TELEGRAM  = os.getenv("TELEGRAM_TOKEN", "SEU_TOKEN_TELEGRAM_AQUI")
+CHAT_ID_CANAL   = os.getenv("TELEGRAM_CHAT",  "@seu_canal_aqui")
+MEU_ID_AFILIADO = os.getenv("MELI_AFFILIATE", "SEU_ID_AFILIADO_AQUI")
 
-DESCONTO_MINIMO = 5    # % mínimo de desconto para postar
-INTERVALO_LOOP  = 3600  # segundos entre varreduras (1 hora)
+INTERVALO_LOOP = 1800  # 30 minutos
 
-# ─────────────────────────────────────────────
-#  BUSCAS POR PALAVRA-CHAVE
-# ─────────────────────────────────────────────
-BUSCAS = [
-    ("📱 Celulares",       "samsung galaxy"),
-    ("📱 Celulares",       "motorola edge"),
-    ("📱 Celulares",       "xiaomi redmi"),
-    ("💇 Cabelo & Beleza", "shampoo loreal"),
-    ("💇 Cabelo & Beleza", "shampoo wella"),
-    ("💇 Cabelo & Beleza", "condicionador tresemme"),
-    ("💇 Cabelo & Beleza", "kit cabelo salon line"),
-    ("👕 Roupas",          "camiseta hering"),
-    ("👕 Roupas",          "conjunto moletom"),
-    ("📚 Livros",          "livro bestseller"),
-    ("📚 Livros",          "livro autoajuda"),
+# Palavras-chave para filtrar as ofertas do Pelando
+PALAVRAS_CHAVE = [
+    "samsung", "motorola", "xiaomi", "iphone", "celular", "smartphone",
+    "shampoo", "cabelo", "loreal", "wella", "condicionador", "tresemme",
+    "camiseta", "roupa", "calcado", "tenis", "moletom",
+    "livro", "kindle",
+]
+
+# Feeds RSS públicos do Pelando por categoria
+FEEDS = [
+    ("📱 Celulares",       "https://www.pelando.com.br/feed/categoria/eletronicos"),
+    ("💇 Cabelo & Beleza", "https://www.pelando.com.br/feed/categoria/beleza"),
+    ("👕 Roupas",          "https://www.pelando.com.br/feed/categoria/moda"),
+    ("📚 Livros",          "https://www.pelando.com.br/feed/categoria/livros"),
+    ("🔥 Geral",           "https://www.pelando.com.br/feed"),
 ]
 
 logging.basicConfig(
@@ -57,103 +56,85 @@ def salvar_historico(ids: set):
     with open(ARQUIVO_HISTORICO, "w") as f:
         json.dump(list(ids), f)
 
-def get_headers() -> dict:
-    return {"Authorization": f"Bearer {ACCESS_TOKEN_MELI}"}
+def contem_palavra_chave(texto: str) -> bool:
+    texto_lower = texto.lower()
+    return any(p in texto_lower for p in PALAVRAS_CHAVE)
 
-def buscar_ofertas(termo: str, categoria: str) -> list:
-    # Sem official_store — funciona com qualquer token de desenvolvedor
-    url = (
-        f"https://api.mercadolibre.com/sites/MLB/search"
-        f"?q={requests.utils.quote(termo)}"
-        f"&sort=relevance"
-        f"&limit=50"
-    )
+def gerar_link_afiliado(link_original: str) -> str:
+    """Se o link for do ML, adiciona o ID de afiliado."""
+    if MEU_ID_AFILIADO == "SEU_ID_AFILIADO_AQUI":
+        return link_original
+    if "mercadolivre.com.br" in link_original or "mercadolibre.com" in link_original:
+        sep = "&" if "?" in link_original else "?"
+        return f"{link_original}{sep}affiliation_id={MEU_ID_AFILIADO}"
+    return link_original
+
+def buscar_feed(url: str, categoria: str) -> list:
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; OfertasBot/1.0)"}
     ofertas = []
     try:
-        r = requests.get(url, headers=get_headers(), timeout=15)
-
-        if r.status_code == 401:
-            log.error("Token inválido ou expirado! Atualize MELI_TOKEN no Railway.")
-            return []
+        r = requests.get(url, headers=headers, timeout=15)
         if r.status_code != 200:
-            log.warning(f"Erro {r.status_code} buscando '{termo}': {r.text[:200]}")
+            log.warning(f"Erro {r.status_code} no feed: {url}")
             return []
 
-        produtos = r.json().get("results", [])
-        log.info(f"  '{termo}': {len(produtos)} produto(s) encontrado(s)")
+        root = ET.fromstring(r.content)
+        channel = root.find("channel")
+        if channel is None:
+            return []
 
-        for item in produtos:
-            preco_atual    = item.get("price")
-            preco_original = item.get("original_price")
+        items = channel.findall("item")
+        log.info(f"  {categoria}: {len(items)} item(s) no feed")
 
-            if not preco_original or not preco_atual:
+        for item in items:
+            titulo = item.findtext("title", "")
+            link   = item.findtext("link", "")
+            desc   = item.findtext("description", "")
+            guid   = item.findtext("guid", link)
+
+            texto_completo = f"{titulo} {desc}"
+
+            if not contem_palavra_chave(texto_completo):
                 continue
-            if preco_atual >= preco_original:
-                continue
 
-            desconto = ((preco_original - preco_atual) / preco_original) * 100
-            if desconto < DESCONTO_MINIMO:
-                continue
-
-            item_id   = item.get("id", "")
-            permalink = item.get("permalink", "")
-            thumbnail = item.get("thumbnail", "").replace("I.jpg", "O.jpg")
-
-            if MEU_ID_AFILIADO and MEU_ID_AFILIADO != "SEU_ID_AFILIADO_AQUI":
-                link = (
-                    f"https://mercadolivre.com/sec/afiliados"
-                    f"?rec_source=affiliate&affiliation_id={MEU_ID_AFILIADO}"
-                    f"&item_id={item_id}"
-                )
-            else:
-                link = permalink
+            link_final = gerar_link_afiliado(link)
 
             ofertas.append({
-                "id":             item_id,
-                "titulo":         item.get("title", ""),
-                "preco_atual":    preco_atual,
-                "preco_original": preco_original,
-                "desconto":       desconto,
-                "link":           link,
-                "thumbnail":      thumbnail,
-                "categoria":      categoria,
+                "id":        guid,
+                "titulo":    titulo,
+                "descricao": desc[:200].strip(),
+                "link":      link_final,
+                "categoria": categoria,
             })
 
+    except ET.ParseError as e:
+        log.error(f"Erro ao parsear RSS de {url}: {e}")
     except requests.exceptions.Timeout:
-        log.error(f"Timeout buscando '{termo}'")
+        log.error(f"Timeout no feed: {url}")
     except Exception as e:
-        log.error(f"Erro ao buscar '{termo}': {e}")
+        log.error(f"Erro no feed {url}: {e}")
 
     return ofertas
 
 def formatar_mensagem(o: dict) -> str:
+    desc = f"\n_{o['descricao']}_\n" if o.get("descricao") else ""
     return (
         f"{o['categoria']}\n\n"
-        f"🛒 *{o['titulo']}*\n\n"
-        f"❌ De: ~R$ {o['preco_original']:,.2f}~\n"
-        f"✅ Por: *R$ {o['preco_atual']:,.2f}*\n"
-        f"🔥 *{o['desconto']:.0f}% OFF!*\n\n"
-        f"👉 [COMPRAR AGORA]({o['link']})"
+        f"🛒 *{o['titulo']}*\n"
+        f"{desc}\n"
+        f"👉 [VER OFERTA]({o['link']})"
     )
 
 def enviar_telegram(oferta: dict) -> bool:
     mensagem = formatar_mensagem(oferta)
-
-    if oferta.get("thumbnail"):
-        r = requests.post(
-            f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendPhoto",
-            json={"chat_id": CHAT_ID_CANAL, "photo": oferta["thumbnail"],
-                  "caption": mensagem, "parse_mode": "Markdown"},
-            timeout=10,
-        )
-        if r.status_code == 200:
-            return True
-        log.warning(f"Foto falhou ({r.status_code}), enviando texto...")
-
     r = requests.post(
         f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage",
-        json={"chat_id": CHAT_ID_CANAL, "text": mensagem,
-              "parse_mode": "Markdown", "disable_web_page_preview": False},
+        json={
+            "chat_id":                  CHAT_ID_CANAL,
+            "text":                     mensagem,
+            "parse_mode":               "Markdown",
+            "disable_web_page_preview": False,
+        },
         timeout=10,
     )
     if r.status_code != 200:
@@ -163,11 +144,11 @@ def enviar_telegram(oferta: dict) -> bool:
 
 def rodar_varredura(historico: set) -> set:
     total = 0
-    for categoria, termo in BUSCAS:
-        log.info(f"🔎 Buscando: '{termo}'...")
-        ofertas = buscar_ofertas(termo, categoria)
+    for categoria, url_feed in FEEDS:
+        log.info(f"🔎 Lendo feed: {categoria}...")
+        ofertas = buscar_feed(url_feed, categoria)
         novas   = [o for o in ofertas if o["id"] not in historico]
-        log.info(f"  ✅ {len(novas)} nova(s) com >= {DESCONTO_MINIMO}% OFF")
+        log.info(f"  ✅ {len(novas)} nova(s) oferta(s) relevante(s)")
 
         for oferta in novas:
             if enviar_telegram(oferta):
@@ -184,11 +165,10 @@ def rodar_varredura(historico: set) -> set:
 
 def main():
     log.info("=" * 52)
-    log.info("  BOT CAÇADOR DE OFERTAS v3.1 — INICIANDO")
-    log.info(f"  Canal:           {CHAT_ID_CANAL}")
-    log.info(f"  Desconto mínimo: {DESCONTO_MINIMO}%")
-    log.info(f"  Intervalo:       {INTERVALO_LOOP // 60} minutos")
-    log.info(f"  Buscas ativas:   {len(BUSCAS)}")
+    log.info("  BOT CAÇADOR DE OFERTAS v4.0 — INICIANDO")
+    log.info(f"  Canal:     {CHAT_ID_CANAL}")
+    log.info(f"  Fonte:     Pelando.com.br (RSS)")
+    log.info(f"  Intervalo: {INTERVALO_LOOP // 60} minutos")
     log.info("=" * 52)
 
     historico = carregar_historico()
