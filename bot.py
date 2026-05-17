@@ -1,6 +1,6 @@
 """
 Bot Caçador de Ofertas - Mercado Livre → Telegram
-Versão: 3.0 (Corrigido)
+Versão: 3.1 (Corrigido - sem official_store)
 """
 
 import requests
@@ -18,19 +18,18 @@ TOKEN_TELEGRAM    = os.getenv("TELEGRAM_TOKEN",  "SEU_TOKEN_TELEGRAM_AQUI")
 CHAT_ID_CANAL     = os.getenv("TELEGRAM_CHAT",   "@seu_canal_aqui")
 MEU_ID_AFILIADO   = os.getenv("MELI_AFFILIATE",  "SEU_ID_AFILIADO_AQUI")
 
-DESCONTO_MINIMO = 15    # % mínimo de desconto para postar
+DESCONTO_MINIMO = 5    # % mínimo de desconto para postar
 INTERVALO_LOOP  = 3600  # segundos entre varreduras (1 hora)
 
 # ─────────────────────────────────────────────
-#  BUSCAS POR PALAVRA-CHAVE + LOJA OFICIAL
+#  BUSCAS POR PALAVRA-CHAVE
 # ─────────────────────────────────────────────
 BUSCAS = [
     ("📱 Celulares",       "samsung galaxy"),
     ("📱 Celulares",       "motorola edge"),
     ("📱 Celulares",       "xiaomi redmi"),
-    ("📱 Celulares",       "iphone apple"),
-    ("💇 Cabelo & Beleza", "shampoo loreal professionnel"),
-    ("💇 Cabelo & Beleza", "shampoo wella professionals"),
+    ("💇 Cabelo & Beleza", "shampoo loreal"),
+    ("💇 Cabelo & Beleza", "shampoo wella"),
     ("💇 Cabelo & Beleza", "condicionador tresemme"),
     ("💇 Cabelo & Beleza", "kit cabelo salon line"),
     ("👕 Roupas",          "camiseta hering"),
@@ -62,12 +61,12 @@ def get_headers() -> dict:
     return {"Authorization": f"Bearer {ACCESS_TOKEN_MELI}"}
 
 def buscar_ofertas(termo: str, categoria: str) -> list:
+    # Sem official_store — funciona com qualquer token de desenvolvedor
     url = (
         f"https://api.mercadolibre.com/sites/MLB/search"
         f"?q={requests.utils.quote(termo)}"
-        f"&official_store=all"
         f"&sort=relevance"
-        f"&limit=30"
+        f"&limit=50"
     )
     ofertas = []
     try:
@@ -77,7 +76,7 @@ def buscar_ofertas(termo: str, categoria: str) -> list:
             log.error("Token inválido ou expirado! Atualize MELI_TOKEN no Railway.")
             return []
         if r.status_code != 200:
-            log.warning(f"Erro {r.status_code} buscando '{termo}'")
+            log.warning(f"Erro {r.status_code} buscando '{termo}': {r.text[:200]}")
             return []
 
         produtos = r.json().get("results", [])
@@ -185,7 +184,7 @@ def rodar_varredura(historico: set) -> set:
 
 def main():
     log.info("=" * 52)
-    log.info("  BOT CAÇADOR DE OFERTAS v3.0 — INICIANDO")
+    log.info("  BOT CAÇADOR DE OFERTAS v3.1 — INICIANDO")
     log.info(f"  Canal:           {CHAT_ID_CANAL}")
     log.info(f"  Desconto mínimo: {DESCONTO_MINIMO}%")
     log.info(f"  Intervalo:       {INTERVALO_LOOP // 60} minutos")
